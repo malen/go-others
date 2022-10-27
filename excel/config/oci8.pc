@@ -1,0 +1,12 @@
+libdir=C:/instantclient_18_5/sdk/lib/msvc
+includedir=C:/instantclient_18_5/sdk/include
+
+glib_genmarshal=glib-genmarshal
+gobject_query=gobject-query
+glib_mkenums=glib-mkenums
+
+Name: oci8
+Description: oci8 library
+Libs: -L${libdir} -loci
+Cflags: -I${includedir}
+Version: 18.5
