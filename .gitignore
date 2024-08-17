@@ -15,3 +15,8 @@
 # vendor/
 
 database/xorm+sqlite3/*.db
+aisoft
+xorm+sqlite3
+
+pkg/
+.DS_Store

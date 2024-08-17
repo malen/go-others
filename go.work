@@ -1,0 +1,8 @@
+go 1.21.3
+
+use (
+	./cron-backup
+	./excel
+	./database/xorm+sqlite3
+	./sendgrid
+)
