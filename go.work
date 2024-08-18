@@ -1,8 +1,11 @@
-go 1.21.3
+go 1.21.4
 
 use (
 	./cron-backup
-	./excel
 	./database/xorm+sqlite3
+	./excel
+	./go-plugin/http-redirect
+	./go-plugin/http-redirect/log-plugin
+	./go-plugin/http-redirect/protocol
 	./sendgrid
 )
