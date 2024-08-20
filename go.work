@@ -8,4 +8,5 @@ use (
 	./go-plugin/http-redirect/log-plugin
 	./go-plugin/http-redirect/protocol
 	./sendgrid
+	./wasm/sample
 )
