@@ -1,0 +1,469 @@
+[{Equal using System;
+using System.Collections.Generic;
+using System.Linq;
+using HojoSystem.EntityFramework;
+using Microsoft.Azure.WebJobs;
+using Microsoft.Extensions.Logging;
+using System.Text.RegularExpressions;
+
+//動作確認用
+using Microsoft.Azure.WebJobs.Extensions.Http;
+using Microsoft.AspNetCore.Http;
+using System.Data;
+using System.Data.OleDb;
+using System.IO;
+using System.Text;
+using System.Xml;
+using System.Xml.Linq;
+using System.Net;
+using Newtonsoft.Json.Linq;
+using Newtonsoft.Json;
+using Microsoft.Data.SqlClient;
+using SqlConnection = Microsoft.Data.SqlClient.SqlConnection;
+using SqlCommand = Microsoft.Data.SqlClient.SqlCommand;
+using HojoSystem.Common;
+
+namespace HojoSystem.Batch
+{
+    public class Jigyouhoukoku
+    {
+        private readonly ApplicationDbContext dbContext;
+        static string db = Environment.GetEnvironmentVariable("sqldb_connection");
+        SqlConnection connection = new SqlConnection(db);
+
+        public Jigyouhoukoku(ApplicationDbContext dbContext)
+        {
+            this.dbContext = dbContext;
+        }
+
+        //事業報告書データ作成タイミング
+        [FunctionName("JigyouhoukokuFunction")]
+        public void JigyouhoukokuFunction(
+        [HttpTrigger(AuthorizationLevel.Anonymous, "get", "post", Route = null)] HttpRequest req, ExecutionContext context, ILogger log)
+        {
+            //処理開始
+            Logger.StartLog(log, req, context);
+
+            DateTime shoriDate = TimeZoneInfo.ConvertTime(DateTime.Now, TimeZoneInfo.FindSystemTimeZoneById("Tokyo Standard Time"));
+            DateTime shoriKaishiDate = new DateTime();
+            DateTime shoriShuuryouDate = new DateTime();
+            string result = "";
+            try
+            {
+                result = Jigyouhoukokuain(shoriDate, shoriKaishiDate, shoriShuuryouDate, null, null, null, context, log);
+            }
+            catch (Exception e)
+            {
+                //異常終了
+                Logger.SystemErrorLog(log, context, e);
+            }
+            //処理終了
+            Logger.EndtLog(log, req, context, "No return value");
+        }
+
+        #region 実行ボタン押下時の処理
+        //<param name = "shoriDate" > 任意の年月日</ param >
+        // < param name = "gaishaCd" > 運用会社コード </ param >
+        // < returns ></ returns >
+
+
+        public string Jigyouhoukokuain(DateTime shoriDate, DateTime shoriStartDate, DateTime shoriEndDate, string gaishaCd, string userName, string userID, ExecutionContext context, ILogger log)
+        {
+            string message = "";
+
+            try
+            {
+                //年月日①
+                DateTime date1 = shoriDate;
+
+                //年月日②
+                DateTime date2;
+
+                //年月日①終了日
+                date1 = shoriEndDate;
+
+                //年月日②開始日
+                date2 = shoriStartDate;
+
+                //カレンダマスターを取得する
+                var calendarList = calendarMasterSearch(date1, null);
+                using (var fileStream = new FileStream("example.txt", FileMode.Open))
+                // new BufferedStream(fileStream) 可选。可以提高性能
+                using (var reader = new StreamReader(new BufferedStream(fileStream)))
+                {
+                    string content = reader.ReadToEnd();
+                    Console.WriteLine(content);
+
+                    string line;
+                    // 读取大文件
+                    while ((line = reader.ReadLine()) != null)
+                    {
+                        ProcessLine(line);
+                    }
+                }
+                //カレンダマスター①
+                var calendar1 = calendarList[2];
+
+                if (shoriDate < calendar1.calendar_date)
+                {
+                    message = $"{date2:yyyy}年{date2:MM}月～{date1:yyyy}年{date1:MM}月のデータが不足しているため作成できません。";
+                }
+                else
+                {
+                    //事業報告データ作成処理
+                    CreateJigyouhoukoku(gaishaCd, date2, date1, userName, userID, context, log);
+                }
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+            return message;
+        }
+
+        //カレンダーマスターテーブル取得
+        private List<M_calendar> calendarMasterSearch(DateTime endDate, M_unnyou_gaisha mug)
+        {
+            List<M_calendar> calendarList = new List<M_calendar>();
+
+            calendarList = dbContext.m_calendar.Where(t => t.calendar_date >= endDate && t.is_heizitsu == "1").OrderBy(t => t.calendar_date).Take(3).ToList();
+
+            return calendarList;
+        }
+
+        #endregion 
+
+
+
+
+        #region 事業報告データ作成
+
+        private void CreateJigyouhoukoku(string gaishaCd, DateTime date2, DateTime date1, string user_name, string user_id, ExecutionContext context, ILogger log)
+        {
+            string comment = "";
+
+            try
+            {
+                //処理件数
+                int num = 0;
+                //正常処理件数
+                int oknum = 0;
+
+                using (var tran = dbContext.Database.BeginTransaction())
+                {
+
+                    string filter = String.Format("&filter=asset_management_code = '{0}'", gaishaCd);
+
+                    //APIから顧客情報取得
+                    var customer_Json = Common.Common.SendRequestToGetCustomerMillion(filter, log)["list"];
+
+                    //List型にデシリアライズする
+                    List<T_kokyaku_milion> resData = customer_Json.ToObject<List<T_kokyaku_milion>>();
+
+                    //顧客milionデータ削除
+                    List<T_kokyaku_milion> tkmList = dbContext.t_kokyaku_milion.ToList();
+
+                    foreach (var tkm in tkmList)
+                    {
+                        dbContext.Remove(tkm);
+                    }
+                    dbContext.SaveChanges();
+
+                    //事業報告データ削除
+                    List<T_jigyou_houkoku> tjList = dbContext.t_jigyou_houkoku.ToList();
+
+                    foreach (var tj in tjList)
+                    {
+                        dbContext.Remove(tj);
+                    }
+                    dbContext.SaveChanges();
+
+                    //Million顧客データテーブルの作成
+                    foreach (var res in resData)
+                    {
+                        try
+                        {
+                            var tkm = CreateKokyakuTable(res);
+
+                            dbContext.Add(tkm);
+                            dbContext.SaveChanges();
+                        }
+                        catch (Exception e)
+                        {
+                            //登録失敗時のデータが保存されないようにする
+                            Common.Common.UndoingChangesDbContextLevel(dbContext);
+
+                            Logger.ApplicationFailedLog(log, context, e);
+                        }
+                    }
+
+                    //契約別残高リスト作成
+                    var tkzList = GetkeiyakubetsuInfo(date2, date1, gaishaCd);
+
+                    //契約別残高テーブルとMillion顧客データテーブル結合
+                    var tkzmList = CreatetkzmList(tkzList, date2, date1);
+
+                    //外部結合したListの数だけ繰り返す
+                    foreach (var tkzt in tkzmList)
+                    {
+                        try
+                        {
+                            //処理件数
+                            num++;
+
+                            //契約別取引リストを作成する
+                            List<T_keiyakubetsu_torihiki> tktList = tktListCreate(date2, date1, tkzt.kokyaku_code, tkzt.keiyaku_number);
+
+                            //契約別月次報酬リストを作成する
+                            List<T_keiyakubetsu_getsuzi_houshuu_renkei> tghrList = tghrListCreate(date2, date1, tkzt.kokyaku_code, tkzt.keiyaku_number);
+
+                            //約定金額を合計する
+                            var totalUriKingaku = tktList.Where(t => t.baibai_kubun == "1").Select(t => t.yakujou_kingaku ?? 0).Sum();
+
+                            var totalKaiKingaku = tktList.Where(t => t.baibai_kubun == "2").Select(t => t.yakujou_kingaku ?? 0).Sum();
+
+                            //委託者報酬(税込)を合計する
+                            var totalItakushaHoushuu = tghrList.Select(t => t.houshuu_itakusha_zei_komi).Sum();
+
+                            //事業報告データテーブルを作成する
+                            var jTable = jigyouhoukokuCreate(date2, date1, tkzt, totalUriKingaku, totalKaiKingaku, totalItakushaHoushuu);
+
+                            dbContext.Add(jTable);
+                            dbContext.SaveChanges();
+
+                            //正常処理件数
+                            oknum++;
+                        }
+                        catch (Exception e)
+                        {
+                            //登録失敗時のデータが保存されないようにする
+                            Common.Common.UndoingChangesDbContextLevel(dbContext);
+
+                            Logger.ApplicationFailedLog(log, context, e);
+
+                            comment = "処理に失敗しました" +tkzt;
+                        }
+                    }
+                    if (num != oknum)
+                    {
+                        comment = (num - oknum).ToString() + "件のデータ作成に失敗しました。";
+                        tran.Rollback();
+                    }
+                    else
+                    {
+                        tran.Commit();
+                    }
+                }
+
+                //ログデータ作成
+                var logdata = logCreate(date2, date1, gaishaCd, user_name, user_id, num, oknum, comment);
+                dbContext.Add(logdata);
+                dbContext.SaveChanges();
+
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+        }
+
+        //Million顧客データテーブルの作成
+        private T_kokyaku_milion CreateKokyakuTable(T_kokyaku_milion res)
+        {
+            T_kokyaku_milion tkm = new T_kokyaku_milion();
+
+            tkm.customer_uuid = res.customer_uuid;
+            tkm.customer_code = res.customer_code;
+            tkm.cp_code = res.cp_code;
+            tkm.account_status = res.account_status;
+            tkm.customer_name = res.customer_name;
+            tkm.customer_name_kana = res.customer_name_kana;
+            tkm.gender = res.gender;
+            tkm.birth_date = res.birth_date;
+            tkm.zip = res.zip;
+            tkm.pref = res.pref;
+            tkm.address1 = res.address1;
+            tkm.address_kana1 = res.address_kana1;
+            tkm.tel1 = res.tel1;
+            tkm.tel2 = res.tel2;
+            tkm.tel3 = res.tel3;
+            tkm.email1 = res.email1;
+            tkm.email2 = res.email2;
+            tkm.specific = res.specific;
+            tkm.ifa_office = res.ifa_office;
+            tkm.ifa_branch = res.ifa_branch;
+            tkm.ifa_attendant = res.ifa_attendant;
+            tkm.asset_management_code = res.asset_management_code;
+            tkm.trust_company_code = res.trust_company_code;
+            tkm.account_management_company_code = res.account_management_company_code;
+            tkm.account_management_branch_code = res.account_management_branch_code;
+            tkm.account_management_account_no = res.account_management_account_no;
+            tkm.account_management_account_code = res.account_management_account_code;
+            tkm.document_class = res.document_class;
+            tkm.officer = res.officer;
+            tkm.officer_section = res.officer_section;
+            tkm.front_updated_at = res.front_updated_at;
+            tkm.job = res.job;
+            tkm.asset_flg = res.asset_flg;
+            tkm.experience_flg = res.experience_flg;
+            tkm.new_nisa = res.new_nisa;
+
+            return tkm;
+        }
+
+        //契約別残高テーブルとTmpテーブル結合
+        private List<T_jigyou_houkoku> CreatetkzmList(List<T_keiyakubetsu_zandaka> tkzList, DateTime date2, DateTime date1)
+        {
+            List<T_jigyou_houkoku> query = (from tkz in tkzList
+                                                        join tkm in dbContext.t_kokyaku_milion on tkz.kokyaku_code equals tkm.customer_code into tkzm
+                                                        from tkzmj in tkzm.DefaultIfEmpty()
+                                                        select new T_jigyou_houkoku
+                                                        {
+                                                            shori_taishou_kaishi = date2,
+                                                            shori_taishou_shuuryou = date1,
+                                                            kokyaku_code = tkz.kokyaku_code,
+                                                            keiyaku_number = tkz.keiyaku_number,
+                                                            unnyou_gaisha_code = tkz.unnyou_gaisha_code,
+                                                            shouhin_code = tkz.shouhin_code,
+                                                            toushi_shintaku_gaisha_code = tkz.toushi_shintaku_gaisha_code,
+                                                            fund_code = tkz.fund_code,
+                                                            kouza_kanri_code = tkz.kouza_kanri_code,
+                                                            kouza_kanri_buten_code = tkz.kouza_kanri_buten_code,
+                                                            kouza_kanri_kouza_number = tkz.kouza_kanri_kouza_number,
+                                                            kouza_kanri_kokyaku_code = tkz.kouza_kanri_kokyaku_code,
+                                                            keiyakubetsu_zandaka = tkz.zika_kingaku
+                                                        }).ToList();
+
+            return query;
+        }
+
+        //契約別残高データを取得
+        private List<T_keiyakubetsu_zandaka> GetkeiyakubetsuInfo(DateTime date2, DateTime date1, string gaishaCd)
+        {
+            var tkz1 = dbContext.t_keiyakubetsu_zandaka
+                       .Where(r => r.kijun_date >= date2 && r.kijun_date <= date1 && r.unnyou_gaisha_code == gaishaCd)
+                       .GroupBy(s => new { s.kokyaku_code, s.keiyaku_number })
+                       .Select(t => new
+                       {
+                           kijun_date = t.Max(u => u.kijun_date),
+                           kokyaku_code = t.Key.kokyaku_code,
+                           keiyaku_number = t.Key.keiyaku_number
+                       });
+
+            var tkz2 = (from t1 in dbContext.t_keiyakubetsu_zandaka
+                        where t1.kijun_date >= date2 && t1.kijun_date <= date1 && t1.unnyou_gaisha_code == gaishaCd
+                        join t2 in tkz1 on new { t1.kijun_date, t1.kokyaku_code, t1.keiyaku_number }
+                        equals new { t2.kijun_date, t2.kokyaku_code, t2.keiyaku_number }
+                        select new T_keiyakubetsu_zandaka
+                        {
+                            kijun_date = t1.kijun_date,
+                            keiyaku_number = t1.keiyaku_number,
+                            kokyaku_code = t1.kokyaku_code,
+                            unnyou_gaisha_code = t1.unnyou_gaisha_code,
+                            shouhin_code = t1.shouhin_code,
+                            toushi_shintaku_gaisha_code = t1.toushi_shintaku_gaisha_code,
+                            kouza_kubun = t1.kouza_kubun,
+                            kouza_kanri_code = t1.kouza_kanri_code,
+                            kouza_kanri_buten_code = t1.kouza_kanri_buten_code,
+                            baikai_gyousha_code = t1.baikai_gyousha_code,
+                            staff_code = t1.staff_code,
+                            kouza_kanri_kouza_number = t1.kouza_kanri_kouza_number,
+                            kouza_kanri_kokyaku_code = t1.kouza_kanri_kokyaku_code,
+                            fund_code = t1.fund_code,
+                            kuchisuu_zanzon = t1. kuchisuu_zanzon,
+                            shutoku_tanka = t1.shutoku_tanka,
+                            shutoku_kingaku = t1.shutoku_kingaku,
+                            zika_tanka = t1.zika_tanka,
+                            zika_kingaku = t1.zika_kingaku,
+                            sashihiki_sonneki_kingaku = t1.sashihiki_sonneki_kingaku,
+                            shuuryou_kubun = t1.shuuryou_kubun
+                        }).ToList();
+
+            var tkz3 = (from t1 in tkz2
+                        group t1 by new { t1.kijun_date, t1.kokyaku_code, t1.keiyaku_number, t1.shouhin_code, t1.unnyou_gaisha_code, t1.toushi_shintaku_gaisha_code, t1.kouza_kanri_code, t1.kouza_kanri_buten_code } into g
+                        select new T_keiyakubetsu_zandaka
+                        {
+                            kijun_date = g.Key.kijun_date,
+                            keiyaku_number = g.Key.keiyaku_number,
+                            kokyaku_code = g.Key.kokyaku_code,
+                            unnyou_gaisha_code = g.Key.unnyou_gaisha_code,
+                            shouhin_code = g.Key.shouhin_code,
+                            toushi_shintaku_gaisha_code = g.Key.toushi_shintaku_gaisha_code,
+                            kouza_kanri_code = g.Key.kouza_kanri_code,
+                            kouza_kanri_buten_code = g.Key.kouza_kanri_buten_code,
+                            fund_code = g.FirstOrDefault().fund_code,
+                            kouza_kanri_kouza_number = g.FirstOrDefault().kouza_kanri_kouza_number,
+                            kouza_kanri_kokyaku_code = g.FirstOrDefault().kouza_kanri_kokyaku_code,
+                            zika_kingaku = g.Sum(t => t.zika_kingaku)
+                        }).ToList();
+
+            return tkz3;
+        }
+
+
+        //契約別取引データを取得
+        private List<T_keiyakubetsu_torihiki> tktListCreate(DateTime date2, DateTime date1, string kokyaku_code, string keiyaku_number)
+        {
+            var tkt = dbContext.t_keiyakubetsu_torihiki.Where(t => t.kijun_date <= date1 && t.kijun_date >= date2 && t.kokyaku_code == kokyaku_code && t.keiyaku_number == keiyaku_number && t.torihiki_kubun != "10").ToList();
+
+            return tkt;
+        }
+
+        //契約別月次報酬データを取得
+        private List<T_keiyakubetsu_getsuzi_houshuu_renkei> tghrListCreate(DateTime date2, DateTime date1, string kokyaku_code, string keiyaku_number)
+        {
+            var tkghr = dbContext.t_keiyakubetsu_getsuzi_houshuu_renkei.Where(t => t.kijun_date <= date1 && t.kijun_date >= date2 && t.kokyaku_code == kokyaku_code && t.keiyaku_number == keiyaku_number).ToList();
+
+            return tkghr;
+        }
+
+
+        //事業報告データ作成
+        private T_jigyou_houkoku jigyouhoukokuCreate(DateTime date2, DateTime date1, T_jigyou_houkoku tjds, long totalUriKingaku, long totalKaiKingaku, long totalItakushaHoushuu)
+        {
+            T_jigyou_houkoku tjdsTable = new T_jigyou_houkoku();
+
+            tjdsTable.shori_taishou_kaishi = date2;
+            tjdsTable.shori_taishou_shuuryou = date1;
+            tjdsTable.kokyaku_code = tjds.kokyaku_code;
+            tjdsTable.keiyaku_number = tjds.keiyaku_number;
+            tjdsTable.unnyou_gaisha_code = tjds.unnyou_gaisha_code;
+            tjdsTable.shouhin_code = tjds.shouhin_code;
+            tjdsTable.toushi_shintaku_gaisha_code = tjds.toushi_shintaku_gaisha_code;
+            tjdsTable.fund_code = tjds.fund_code;
+            tjdsTable.kouza_kanri_code = tjds.kouza_kanri_code;
+            tjdsTable.kouza_kanri_buten_code = tjds.kouza_kanri_buten_code;
+            tjdsTable.kouza_kanri_kouza_number = tjds.kouza_kanri_kouza_number;
+            tjdsTable.kouza_kanri_kokyaku_code = tjds.kouza_kanri_kokyaku_code;
+            tjdsTable.keiyakubetsu_zandaka = tjds.keiyakubetsu_zandaka;
+            tjdsTable.torihiki_sougaku_uri = totalUriKingaku;
+            tjdsTable.torihiki_sougaku_kai = totalKaiKingaku;
+            tjdsTable.houshuu_itakusha_sougaku = totalItakushaHoushuu;
+
+            return tjdsTable;
+        }
+
+        //ログデータに登録する
+        private T_log_jigyou_kyoukai logCreate(DateTime date2, DateTime date1, string gaishaCd, string user_name, string user_id, int num, int oknum, string comment)
+        {
+            T_log_jigyou_kyoukai tlns = new T_log_jigyou_kyoukai();
+
+            tlns.shori_taishou_kaishi = date2;
+            tlns.shori_taishou_shuuryou = date1;
+            tlns.unnyou_gaisha_code = gaishaCd;
+            tlns.shori_time = TimeZoneInfo.ConvertTime(DateTime.Now, TimeZoneInfo.FindSystemTimeZoneById("Tokyo Standard Time"));
+            tlns.user_name = user_name;
+            tlns.user_id = user_id;
+            tlns.kinou_kubun = "} {Delete 15} {Insert 9999} {Equal ";
+            tlns.shori_kubun = "36";
+            tlns.shori_kekka = (num - oknum == 0) ? "1" : "0"; //1：成功、0：失敗
+            tlns.shori_kensuu = num;
+            tlns.seijou_kensuu = oknum;
+            tlns.ijou_kensuu = num - oknum;
+            tlns.comment = (num - oknum == 0) ? null : comment;
+
+            return tlns;
+        }
+    }
+}
+#endregion}]

@@ -4,6 +4,8 @@ use (
 	./cron-backup
 	./database/xorm+sqlite3
 	./excel
+	./gin-example
+	./go-diff
 	./go-plugin/http-redirect
 	./go-plugin/http-redirect/log-plugin
 	./go-plugin/http-redirect/protocol
