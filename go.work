@@ -1,4 +1,4 @@
-go 1.21.4
+go 1.24.0
 
 use (
 	./cron-backup
@@ -11,4 +11,5 @@ use (
 	./go-plugin/http-redirect/protocol
 	./sendgrid
 	./wasm/sample
+	./playwright-go-demo
 )
